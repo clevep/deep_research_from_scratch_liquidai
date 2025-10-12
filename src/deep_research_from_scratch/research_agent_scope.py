@@ -29,7 +29,26 @@ def get_today_str() -> str:
 # ===== CONFIGURATION =====
 
 # Initialize model
-model = init_chat_model(model="openai:gpt-4.1", temperature=0.0)
+# model = init_chat_model(model="openai:gpt-4.1", temperature=0.0)
+
+model = (
+    init_chat_model(                      # keep the name 'model' if your code expects it
+        model="lfm2",
+        model_provider="openai",
+        base_url="http://localhost:8080/v1",
+        api_key="sk-no-key",
+        temperature=0.2,
+    )
+    .bind(
+        response_format={"type": "json_object"}, # no JSON grammar
+        max_tokens=256,
+        tool_choice="none",               # avoid tool schema bloat on basic calls
+        extra_body={"cache_prompt": False}
+    )
+)
+
+print(model.invoke([HumanMessage(content="Say hi in one short sentence.")]).content)
+
 
 # ===== WORKFLOW NODES =====
 
@@ -41,7 +60,7 @@ def clarify_with_user(state: AgentState) -> Command[Literal["write_research_brie
     Routes to either research brief generation or ends with a clarification question.
     """
     # Set up structured output model
-    structured_output_model = model.with_structured_output(ClarifyWithUser)
+    structured_output_model = model.with_structured_output(ClarifyWithUser, method="json_mode")
 
     # Invoke the model with clarification instructions
     response = structured_output_model.invoke([
@@ -71,7 +90,7 @@ def write_research_brief(state: AgentState):
     and contains all necessary details for effective research.
     """
     # Set up structured output model
-    structured_output_model = model.with_structured_output(ResearchQuestion)
+    structured_output_model = model.with_structured_output(ResearchQuestion, method="json_mode")
 
     # Generate research brief from conversation history
     response = structured_output_model.invoke([

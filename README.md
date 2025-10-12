@@ -202,3 +202,374 @@ This repo contains 5 tutorial notebooks that build a deep research system from s
 - **Protocol Integration**: MCP servers and tool ecosystems
 
 Each notebook builds on the previous concepts, culminating in a production-ready deep research system that can handle complex, multi-faceted research queries with intelligent scoping and coordinated execution. 
+
+
+
+==========
+
+
+# Install & Run the llama.cpp C++ Server (OpenAI-compatible)
+
+This guide shows how to build and run the **C++ HTTP server** from the `llama.cpp` project.  
+It exposes OpenAI-style endpoints (`/v1/chat/completions`) and works great with LangChain’s `init_chat_model`.
+
+---
+
+## 1) Prerequisites
+
+### macOS (Apple Silicon or Intel)
+- Command Line Tools:  
+  ```bash
+  xcode-select --install
+  ```
+- Homebrew packages:  
+  ```bash
+  brew install cmake
+  ```
+- Model file in **GGUF** format (e.g. `LFM2-1.2B-Tool-Q4_K_M.gguf`)
+
+### Linux
+- Build tools:  
+  ```bash
+  sudo apt-get update && sudo apt-get install -y build-essential cmake git
+  ```
+- (Optional) CUDA Toolkit installed if you want GPU acceleration
+
+---
+
+## 2) Get the Source
+
+```bash
+git clone https://github.com/ggml-org/llama.cpp.git
+cd llama.cpp
+```
+
+> The C++ server binary is built via **CMake** and is typically called `llama-server` (sometimes just `server`) under `build/bin/`.
+
+---
+
+## 3) Build
+
+### macOS + Metal (recommended on Apple Silicon)
+```bash
+cmake -S . -B build -DGGML_METAL=ON -DLLAMA_BUILD_SERVER=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+```
+
+### Linux (CPU only)
+```bash
+cmake -S . -B build -DLLAMA_BUILD_SERVER=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+```
+
+### Linux (CUDA GPU)
+```bash
+cmake -S . -B build -DGGML_CUDA=ON -DLLAMA_BUILD_SERVER=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+```
+
+**Verify the binary exists:**
+```bash
+ls -l build/bin
+# expect: ./build/bin/llama-server  (or ./build/bin/server)
+```
+
+---
+
+## 4) Run the Server
+
+Basic, stable startup (single request at a time, no continuation batching):
+
+```bash
+./build/bin/llama-server \
+  -m /absolute/path/to/your-model.gguf \
+  -c 4096 \
+  --port 8080 \
+  --parallel 1 \
+  --no-cont-batching
+```
+
+**Flags explained**
+- `-m` / `--model` — path to the GGUF model  
+- `-c` / `--ctx-size` — context window (4096 is plenty for 1–3B models)  
+- `--port` — HTTP port  
+- `--parallel` — number of parallel sequences  
+- `--no-cont-batching` — disables continuation batching (avoids KV cache reuse edge cases)
+
+> 💡 On macOS/Metal: the first run compiles Metal kernels in memory; you’ll see initialization messages. That’s normal.
+
+---
+
+## 5) Quick Validation
+
+```bash
+curl http://127.0.0.1:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model":"lfm2",
+    "messages":[{"role":"user","content":"Say hi in one short sentence."}],
+    "max_tokens":32,
+    "cache_prompt": false,
+    "stream": false
+  }'
+```
+
+You should get a small JSON response with an assistant message.
+
+---
+
+## 6) Use with LangChain (`init_chat_model`)
+
+```python
+from langchain.chat_models import init_chat_model
+from langchain_core.messages import HumanMessage
+
+chat = init_chat_model(
+    model="lfm2",                               # arbitrary label
+    model_provider="openai",                    # OpenAI-compatible
+    base_url="http://127.0.0.1:8080/v1",        # C++ server endpoint
+    api_key="sk-no-key",                        # any non-empty string
+    temperature=0.2,
+).bind(
+    response_format={"type": "text"},           # avoid JSON grammar on router steps
+    max_tokens=256,
+    extra_body={"cache_prompt": False, "stream": False}
+)
+
+print(chat.invoke([HumanMessage(content="Say hi in one short sentence.")]).content)
+```
+
+---
+
+## 7) Common Troubleshooting
+
+### “invalid argument: 0” after `--cont-batching`
+Use the boolean flag form:
+- Disable: `--no-cont-batching` (or `-nocb`)
+- Enable: `--cont-batching` (no value)
+
+### 500 error: `tool_choice param requires --jinja`
+The C++ server expects **Jinja chat templates** if you send `tool_choice`/`tools`.  
+**Fix:** Don’t send `tool_choice` (or don’t bind tools). Prefer **client-side tools** (have the model return JSON args; you parse and call the function).  
+If you *must* do server-side tools:
+- start server with `--jinja --chat-template <template.jinja>`,
+- then include `tools`/`tool_choice` in requests.
+
+### KV cache / decode errors
+- Keep `--no-cont-batching` for stability.  
+- Keep prompts short on routing/clarify nodes; set `extra_body={"cache_prompt": false}` in requests.  
+- Avoid complex JSON grammars unless needed.
+
+### Port already in use
+Pick another port:
+```bash
+--port 8081
+```
+
+### Binary name confusion
+Some builds produce `build/bin/llama-server`, others `build/bin/server`.  
+Use whichever exists in `build/bin`.
+
+---
+
+## 8) (Optional) Run as a Background Service
+
+### macOS (launchctl example)
+Create `~/Library/LaunchAgents/com.llama.server.plist`:
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+ "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.llama.server</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/absolute/path/llama.cpp/build/bin/llama-server</string>
+    <string>-m</string><string>/absolute/path/model.gguf</string>
+    <string>-c</string><string>4096</string>
+    <string>--port</string><string>8080</string>
+    <string>--parallel</string><string>1</string>
+    <string>--no-cont-batching</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/tmp/llama-server.out</string>
+  <key>StandardErrorPath</key><string>/tmp/llama-server.err</string>
+</dict>
+</plist>
+```
+
+Then:
+```bash
+launchctl load ~/Library/LaunchAgents/com.llama.server.plist
+launchctl start com.llama.server
+```
+
+### Linux (systemd example)
+`/etc/systemd/system/llama-server.service`:
+```ini
+[Unit]
+Description=llama.cpp HTTP Server
+After=network.target
+
+[Service]
+ExecStart=/opt/llama.cpp/build/bin/llama-server -m /opt/models/model.gguf -c 4096 --port 8080 --parallel 1 --no-cont-batching
+Restart=always
+User=llama
+WorkingDirectory=/opt/llama.cpp
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Then:
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now llama-server
+```
+
+---
+
+## 9) Performance Tips
+
+- Increase `--parallel` gradually (2, 3, …) if you need concurrency.  
+- On Apple Silicon, Metal is fast out of the box; no extra flags needed beyond `-DGGML_METAL=ON`.  
+- For larger models, watch memory. Keep `-c` reasonable (4096–8192) unless you truly need more.  
+- Prefer quantized models (Q4_K_M / Q4_K_S / Q5_K_M) for speed and memory savings.
+
+---
+
+## 10) Quick Checklist
+
+- [ ] Built with `-DLLAMA_BUILD_SERVER=ON`  
+- [ ] Can run `./build/bin/llama-server --help`  
+- [ ] Starts with `--parallel 1 --no-cont-batching`  
+- [ ] `curl` test returns a reply  
+- [ ] LangChain points to `http://127.0.0.1:8080/v1`
+
+---
+
+If you’d like, you can create a simple `build_and_run.sh` script to rebuild and launch the server automatically for your setup.
+
+
+======
+
+# README — Download & Use the Liquid AI LFM2-1.2B-Tool Model
+
+This guide explains how to download and use the **Liquid AI LFM2-1.2B-Tool** model in `llama.cpp` (or via its C++ server).
+
+---
+
+## 1) Model Overview
+
+- **Model:** [`LiquidAI/LFM2-1.2B-Tool-GGUF`](https://huggingface.co/LiquidAI/LFM2-1.2B-Tool-GGUF)  
+- **Size:** ~1.2B parameters  
+- **Format:** GGUF (quantized)  
+- **Architecture:** Llama-style fine-tune with built-in **function/tool-use** capabilities  
+- **Best quantization for general use:** `Q4_K_M` (good balance of quality and speed)
+
+---
+
+## 2) Download the Model
+
+Run the following in your model directory (create it first if needed):
+
+```bash
+mkdir -p ./models
+cd ./models
+
+# Download directly from Hugging Face (use 'main' branch)
+curl -L -o LFM2-1.2B-Tool-Q4_K_M.gguf \
+  https://huggingface.co/LiquidAI/LFM2-1.2B-Tool-GGUF/resolve/main/LFM2-1.2B-Tool-Q4_K_M.gguf
+```
+
+> ✅ Tip:  
+> You can also use `huggingface-cli` if installed:
+> ```bash
+> huggingface-cli download LiquidAI/LFM2-1.2B-Tool-GGUF LFM2-1.2B-Tool-Q4_K_M.gguf --local-dir ./models
+> ```
+
+---
+
+## 3) Run with `llama.cpp` C++ Server
+
+Assuming you’ve already built `llama-server` (see [llama.cpp build guide](https://github.com/ggml-org/llama.cpp)):
+
+```bash
+./build/bin/llama-server \
+  -m ./models/LFM2-1.2B-Tool-Q4_K_M.gguf \
+  -c 4096 \
+  --port 8080 \
+  --parallel 1 \
+  --no-cont-batching \
+  --jinja
+```
+
+You should see log lines ending with something like:
+```
+HTTP server listening at http://127.0.0.1:8080
+```
+
+---
+
+## 4) Test with `curl`
+
+```bash
+curl http://127.0.0.1:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "lfm2",
+    "messages": [{"role":"user","content":"Say hi in one short sentence."}],
+    "max_tokens": 32,
+    "temperature": 0.7
+  }'
+```
+
+Expected response:
+```json
+{
+  "choices": [{
+    "message": {"role": "assistant", "content": "Hello there!"}
+  }]
+}
+```
+
+---
+
+## 5) Use from LangChain
+
+```python
+from langchain.chat_models import init_chat_model
+from langchain_core.messages import HumanMessage
+
+model = init_chat_model(
+    model="lfm2",
+    model_provider="openai",
+    base_url="http://127.0.0.1:8080/v1",
+    api_key="sk-no-key",
+    temperature=0.2,
+)
+
+print(model.invoke([HumanMessage(content="Summarize the purpose of Liquid AI.")] ).content)
+```
+
+---
+
+## 6) Notes
+
+- `LFM2-1.2B-Tool` supports **function/tool call generation**, so you can integrate it with local tool-executing frameworks.
+- Works well on Apple Silicon (`M2`, `M3`) via Metal or on CPU-only Linux.
+- For stability, use:
+  - `--parallel 1`
+  - `--no-cont-batching`
+  - `--cache_prompt false` on your API calls
+
+---
+
+## 7) References
+
+- Model card: [LiquidAI/LFM2-1.2B-Tool-GGUF on Hugging Face](https://huggingface.co/LiquidAI/LFM2-1.2B-Tool-GGUF)
+- llama.cpp project: [https://github.com/ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp)
