@@ -85,6 +85,11 @@ Guidelines:
 - For academic or scientific queries, prefer linking directly to the original paper or official journal publication rather than survey papers or secondary summaries.
 - For people, try linking directly to their LinkedIn profile, or their personal website if they have one.
 - If the query is in a specific language, prioritize sources published in that language.
+
+Respond in valid JSON format with this exact key:
+{{
+  "research_brief": "<your detailed research question here>"
+}}
 """
 
 research_agent_prompt =  """You are a research assistant conducting research on the user's input topic. For context, today's date is {date}.
@@ -506,6 +511,11 @@ Judgment: NOT CAPTURED - specific doorman requirement not mentioned
 3. Provide specific quotes or references from the brief as evidence
 4. Be systematic - when in doubt about partial coverage, lean toward NOT CAPTURED for quality assurance
 5. Focus on whether a researcher could act on this criterion based on the brief alone
+
+Return your evaluation as a JSON object with the following fields:
+- criteria_text: The criterion being evaluated
+- reasoning: Your detailed explanation
+- is_captured: Boolean indicating if the criterion is captured
 </output_instructions>"""
 
 BRIEF_HALLUCINATION_PROMPT = """
@@ -569,4 +579,8 @@ Judgment: FAIL - assumes "modern", "safe", and "good schools" preferences
 
 <output_instructions>
 Carefully scan the brief for any details not explicitly provided by the user. Be strict - when in doubt about whether something was user-specified, lean toward FAIL.
+
+Return your evaluation as a JSON object with the following fields:
+- no_assumptions: Boolean indicating if the brief avoids unwarranted assumptions
+- reasoning: Your detailed explanation
 </output_instructions>"""
