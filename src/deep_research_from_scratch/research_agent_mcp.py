@@ -52,9 +52,25 @@ def get_mcp_client():
         _client = MultiServerMCPClient(mcp_config)
     return _client
 
-# Initialize models
-compress_model = init_chat_model(model="openai:gpt-4.1", max_tokens=32000)
-model = init_chat_model(model="anthropic:claude-sonnet-4-20250514")
+# Initialize models - using dual LFM2 setup
+# Compression model uses base LFM2 on port 8081 for plain text generation
+compress_model = init_chat_model(
+    model="lfm2",
+    model_provider="openai",
+    base_url="http://localhost:8081/v1",
+    api_key="sk-no-key",
+    temperature=0.2,
+    max_tokens=32000,
+)
+
+# Main research model uses LFM2-Tool on port 8080 for tool calling
+model = init_chat_model(
+    model="lfm2",
+    model_provider="openai",
+    base_url="http://localhost:8080/v1",
+    api_key="sk-no-key",
+    temperature=0.2,
+)
 
 # ===== AGENT NODES =====
 
