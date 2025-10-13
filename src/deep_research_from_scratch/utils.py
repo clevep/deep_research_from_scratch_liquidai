@@ -39,7 +39,22 @@ def get_current_dir() -> Path:
 
 # ===== CONFIGURATION =====
 
-summarization_model = init_chat_model(model="openai:gpt-4.1-mini")
+# Use base LFM2 model (port 8081) for summarization - better for plain text generation
+summarization_model = (
+    init_chat_model(
+        model="lfm2",
+        model_provider="openai",
+        base_url="http://localhost:8081/v1",
+        api_key="sk-no-key",
+        temperature=0.2,
+    )
+    .bind(
+        response_format={"type": "json_object"},
+        max_tokens=1024,
+        extra_body={"cache_prompt": False}
+    )
+)
+
 tavily_client = TavilyClient()
 
 # ===== SEARCH FUNCTIONS =====

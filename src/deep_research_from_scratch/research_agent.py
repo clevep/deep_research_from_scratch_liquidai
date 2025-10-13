@@ -22,11 +22,42 @@ from deep_research_from_scratch.prompts import research_agent_prompt, compress_r
 tools = [tavily_search, think_tool]
 tools_by_name = {tool.name: tool for tool in tools}
 
-# Initialize models
-model = init_chat_model(model="anthropic:claude-sonnet-4-20250514")
+# Initialize main research model (with tools) - uses LFM2-Tool on port 8080
+model = init_chat_model(
+    model="lfm2",
+    model_provider="openai",
+    base_url="http://localhost:8080/v1",
+    api_key="sk-no-key",
+    temperature=0.2,
+)
 model_with_tools = model.bind_tools(tools)
-summarization_model = init_chat_model(model="openai:gpt-4.1-mini")
-compress_model = init_chat_model(model="openai:gpt-4.1", max_tokens=32000) # model="anthropic:claude-sonnet-4-20250514", max_tokens=64000
+
+# Initialize summarization model (with json_mode for structured output) - uses base LFM2 on port 8081
+summarization_model = (
+    init_chat_model(
+        model="lfm2",
+        model_provider="openai",
+        base_url="http://localhost:8081/v1",
+        api_key="sk-no-key",
+        temperature=0.2,
+    )
+    .bind(
+        response_format={"type": "json_object"},
+        max_tokens=1024,
+        extra_body={"cache_prompt": False}
+    )
+)
+
+# Initialize compression model - uses base LFM2 on port 8081 for plain text generation
+# LFM2 supports 32,768 tokens - using 32,000 to match original configuration
+compress_model = init_chat_model(
+    model="lfm2",
+    model_provider="openai",
+    base_url="http://localhost:8081/v1",
+    api_key="sk-no-key",
+    temperature=0.2,
+    max_tokens=32000,
+)
 
 # ===== AGENT NODES =====
 

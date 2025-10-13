@@ -283,17 +283,17 @@ Basic, stable startup (single request at a time, no continuation batching):
 ```bash
 ./build/bin/llama-server \
   -m /absolute/path/to/your-model.gguf \
-  -c 4096 \
+  -c 32768 \
   --port 8080 \
   --parallel 1 \
   --no-cont-batching
 ```
 
 **Flags explained**
-- `-m` / `--model` — path to the GGUF model  
-- `-c` / `--ctx-size` — context window (4096 is plenty for 1–3B models)  
-- `--port` — HTTP port  
-- `--parallel` — number of parallel sequences  
+- `-m` / `--model` — path to the GGUF model
+- `-c` / `--ctx-size` — context window (32768 for LFM2 models, which support up to 32,768 tokens)
+- `--port` — HTTP port
+- `--parallel` — number of parallel sequences
 - `--no-cont-batching` — disables continuation batching (avoids KV cache reuse edge cases)
 
 > 💡 On macOS/Metal: the first run compiles Metal kernels in memory; you’ll see initialization messages. That’s normal.
@@ -387,7 +387,7 @@ Create `~/Library/LaunchAgents/com.llama.server.plist`:
   <array>
     <string>/absolute/path/llama.cpp/build/bin/llama-server</string>
     <string>-m</string><string>/absolute/path/model.gguf</string>
-    <string>-c</string><string>4096</string>
+    <string>-c</string><string>32768</string>
     <string>--port</string><string>8080</string>
     <string>--parallel</string><string>1</string>
     <string>--no-cont-batching</string>
@@ -414,7 +414,7 @@ Description=llama.cpp HTTP Server
 After=network.target
 
 [Service]
-ExecStart=/opt/llama.cpp/build/bin/llama-server -m /opt/models/model.gguf -c 4096 --port 8080 --parallel 1 --no-cont-batching
+ExecStart=/opt/llama.cpp/build/bin/llama-server -m /opt/models/model.gguf -c 32768 --port 8080 --parallel 1 --no-cont-batching
 Restart=always
 User=llama
 WorkingDirectory=/opt/llama.cpp
@@ -435,9 +435,10 @@ sudo systemctl enable --now llama-server
 
 ## 9) Performance Tips
 
-- Increase `--parallel` gradually (2, 3, …) if you need concurrency.  
-- On Apple Silicon, Metal is fast out of the box; no extra flags needed beyond `-DGGML_METAL=ON`.  
-- For larger models, watch memory. Keep `-c` reasonable (4096–8192) unless you truly need more.  
+- Increase `--parallel` gradually (2, 3, …) if you need concurrency.
+- On Apple Silicon, Metal is fast out of the box; no extra flags needed beyond `-DGGML_METAL=ON`.
+- For LFM2 models, use `-c 32768` to leverage the full context window for research tasks with long webpages and documents.
+- For larger models, watch memory. The context size impacts memory usage.
 - Prefer quantized models (Q4_K_M / Q4_K_S / Q5_K_M) for speed and memory savings.
 
 ---
@@ -457,66 +458,107 @@ If you’d like, you can create a simple `build_and_run.sh` script to rebuild an
 
 ======
 
-# README — Download & Use the Liquid AI LFM2-1.2B-Tool Model
+# README — Download & Use Liquid AI LFM2 Models
 
-This guide explains how to download and use the **Liquid AI LFM2-1.2B-Tool** model in `llama.cpp` (or via its C++ server).
+This guide explains how to download and use **two Liquid AI LFM2 models** for the deep research system. We use a dual-model setup for optimal performance:
+
+- **LFM2-1.2B-Tool** (port 8080): For tool-calling research agent
+- **LFM2-1.2B** (port 8081): For text generation (compression & summarization)
 
 ---
 
 ## 1) Model Overview
 
-- **Model:** [`LiquidAI/LFM2-1.2B-Tool-GGUF`](https://huggingface.co/LiquidAI/LFM2-1.2B-Tool-GGUF)  
-- **Size:** ~1.2B parameters  
-- **Format:** GGUF (quantized)  
-- **Architecture:** Llama-style fine-tune with built-in **function/tool-use** capabilities  
-- **Best quantization for general use:** `Q4_K_M` (good balance of quality and speed)
+### LFM2-1.2B-Tool (Research Agent)
+- **Model:** [`LiquidAI/LFM2-1.2B-Tool-GGUF`](https://huggingface.co/LiquidAI/LFM2-1.2B-Tool-GGUF)
+- **Purpose:** Main research agent with tool calling capabilities
+- **Size:** ~1.2B parameters (697MB Q4_K_M)
+- **Architecture:** Fine-tuned for **function/tool-use**
+- **Port:** 8080
+
+### LFM2-1.2B (Base Model)
+- **Model:** [`LiquidAI/LFM2-1.2B-GGUF`](https://huggingface.co/LiquidAI/LFM2-1.2B-GGUF)
+- **Purpose:** Research compression & webpage summarization
+- **Size:** ~1.2B parameters (697MB Q4_K_M)
+- **Architecture:** Base model optimized for plain text generation
+- **Port:** 8081
+
+**Why two models?** The Tool model is specialized for function calling, which can cause it to output tool call JSON instead of narrative text. The base model excels at plain text generation for compression tasks.
 
 ---
 
-## 2) Download the Model
+## 2) Download Both Models
 
-Run the following in your model directory (create it first if needed):
+Run the following in your project models directory:
 
 ```bash
-mkdir -p ./models
 cd ./models
 
-# Download directly from Hugging Face (use 'main' branch)
+# Download LFM2-Tool model (for research agent)
 curl -L -o LFM2-1.2B-Tool-Q4_K_M.gguf \
   https://huggingface.co/LiquidAI/LFM2-1.2B-Tool-GGUF/resolve/main/LFM2-1.2B-Tool-Q4_K_M.gguf
+
+# Download LFM2 base model (for compression)
+curl -L -o LFM2-1.2B-Q4_K_M.gguf \
+  https://huggingface.co/LiquidAI/LFM2-1.2B-GGUF/resolve/main/LFM2-1.2B-Q4_K_M.gguf
 ```
 
-> ✅ Tip:  
+> ✅ Tip:
 > You can also use `huggingface-cli` if installed:
 > ```bash
 > huggingface-cli download LiquidAI/LFM2-1.2B-Tool-GGUF LFM2-1.2B-Tool-Q4_K_M.gguf --local-dir ./models
+> huggingface-cli download LiquidAI/LFM2-1.2B-GGUF LFM2-1.2B-Q4_K_M.gguf --local-dir ./models
 > ```
 
+Verify both models are downloaded:
+```bash
+ls -lh ./models/
+# Should show both:
+# LFM2-1.2B-Tool-Q4_K_M.gguf (~697MB)
+# LFM2-1.2B-Q4_K_M.gguf (~697MB)
+```
+
 ---
 
-## 3) Run with `llama.cpp` C++ Server
+## 3) Run Both Servers
 
-Assuming you’ve already built `llama-server` (see [llama.cpp build guide](https://github.com/ggml-org/llama.cpp)):
+Assuming you've already built `llama-server` (see [llama.cpp build guide](https://github.com/ggml-org/llama.cpp)), start **two separate server instances**:
+
+### Terminal 1 - Tool Model (Port 8080)
 
 ```bash
-./build/bin/llama-server \
+./llama.cpp/build/bin/llama-server \
   -m ./models/LFM2-1.2B-Tool-Q4_K_M.gguf \
-  -c 4096 \
+  -c 32768 \
   --port 8080 \
   --parallel 1 \
-  --no-cont-batching \
-  --jinja
+  --no-cont-batching
 ```
 
-You should see log lines ending with something like:
+### Terminal 2 - Base Model (Port 8081)
+
+```bash
+./llama.cpp/build/bin/llama-server \
+  -m ./models/LFM2-1.2B-Q4_K_M.gguf \
+  -c 32768 \
+  --port 8081 \
+  --parallel 1 \
+  --no-cont-batching
 ```
-HTTP server listening at http://127.0.0.1:8080
+
+> **Note:** LFM2 models support up to 32,768 tokens context window. Using `-c 32768` ensures you can process longer webpages and research content without truncation errors.
+
+You should see both servers start:
+```
+Terminal 1: HTTP server listening at http://127.0.0.1:8080
+Terminal 2: HTTP server listening at http://127.0.0.1:8081
 ```
 
 ---
 
-## 4) Test with `curl`
+## 4) Test Both Servers
 
+### Test Tool Model (Port 8080)
 ```bash
 curl http://127.0.0.1:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
@@ -528,7 +570,19 @@ curl http://127.0.0.1:8080/v1/chat/completions \
   }'
 ```
 
-Expected response:
+### Test Base Model (Port 8081)
+```bash
+curl http://127.0.0.1:8081/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "lfm2",
+    "messages": [{"role":"user","content":"Say hi in one short sentence."}],
+    "max_tokens": 32,
+    "temperature": 0.7
+  }'
+```
+
+Both should return:
 ```json
 {
   "choices": [{
@@ -541,11 +595,14 @@ Expected response:
 
 ## 5) Use from LangChain
 
+The deep research notebooks are configured to use both servers:
+
 ```python
 from langchain.chat_models import init_chat_model
 from langchain_core.messages import HumanMessage
 
-model = init_chat_model(
+# Tool model (port 8080) - for research agent with tool calling
+research_model = init_chat_model(
     model="lfm2",
     model_provider="openai",
     base_url="http://127.0.0.1:8080/v1",
@@ -553,23 +610,49 @@ model = init_chat_model(
     temperature=0.2,
 )
 
-print(model.invoke([HumanMessage(content="Summarize the purpose of Liquid AI.")] ).content)
+# Base model (port 8081) - for compression and summarization
+compression_model = init_chat_model(
+    model="lfm2",
+    model_provider="openai",
+    base_url="http://127.0.0.1:8081/v1",
+    api_key="sk-no-key",
+    temperature=0.2,
+    max_tokens=32000,
+)
+
+print(compression_model.invoke([HumanMessage(content="Summarize the purpose of Liquid AI.")]).content)
 ```
 
 ---
 
-## 6) Notes
+## 6) Memory Requirements
 
-- `LFM2-1.2B-Tool` supports **function/tool call generation**, so you can integrate it with local tool-executing frameworks.
-- Works well on Apple Silicon (`M2`, `M3`) via Metal or on CPU-only Linux.
-- For stability, use:
-  - `--parallel 1`
-  - `--no-cont-batching`
-  - `--cache_prompt false` on your API calls
+**Running both models simultaneously:**
+- Model weights: ~1.4 GB total (697MB each)
+- KV cache (32k context): ~4-6 GB total
+- **Total: ~6-8 GB RAM**
+
+**Recommended specs:**
+- ✅ 16GB+ RAM: Comfortable
+- ✅ Apple Silicon (M2/M3): Excellent with unified memory and Metal acceleration
+- ⚠️ 8GB RAM: Possible but tight
 
 ---
 
-## 7) References
+## 7) Notes
 
-- Model card: [LiquidAI/LFM2-1.2B-Tool-GGUF on Hugging Face](https://huggingface.co/LiquidAI/LFM2-1.2B-Tool-GGUF)
+- `LFM2-1.2B-Tool` supports **function/tool call generation** for the research agent
+- `LFM2-1.2B` (base) provides **clean plain text generation** for compression tasks
+- Both work excellently on Apple Silicon via Metal or CPU-only Linux
+- For stability, use:
+  - `--parallel 1`
+  - `--no-cont-batching`
+  - `-c 32768` for full context window
+
+---
+
+## 8) References
+
+- Tool model: [LiquidAI/LFM2-1.2B-Tool-GGUF on Hugging Face](https://huggingface.co/LiquidAI/LFM2-1.2B-Tool-GGUF)
+- Base model: [LiquidAI/LFM2-1.2B-GGUF on Hugging Face](https://huggingface.co/LiquidAI/LFM2-1.2B-GGUF)
 - llama.cpp project: [https://github.com/ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp)
