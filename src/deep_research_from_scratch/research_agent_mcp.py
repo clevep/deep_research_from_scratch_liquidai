@@ -12,6 +12,7 @@ Key features:
 - Secure directory access with permission checking
 - Research compression for efficient processing
 - Lazy MCP client initialization for LangGraph Platform compatibility
+- Message pruning for LFM2 compatibility (keeps 2-message context for tool calling)
 """
 
 import os
@@ -108,7 +109,20 @@ async def list_all_available_files_impl() -> str:
     for path in paths:
         try:
             files_result = await list_dir_tool.ainvoke({"path": path})
-            all_files.append(f"\nDirectory: {path}\nFiles: {files_result}")
+            # Parse file names and build full paths so LFM2 can copy exact paths
+            # files_result format: "[FILE] filename.ext\n[FILE] other.ext"
+            file_entries = []
+            for line in str(files_result).split('\n'):
+                if '[FILE]' in line:
+                    filename = line.replace('[FILE]', '').strip()
+                    if filename:
+                        full_path = f"{path}/{filename}"
+                        file_entries.append(f"  - {filename} (FULL_PATH: {full_path})")
+
+            if file_entries:
+                all_files.append(f"\nDirectory: {path}\nFiles:\n" + "\n".join(file_entries))
+            else:
+                all_files.append(f"\nDirectory: {path}\nFiles: {files_result}")
         except Exception as e:
             all_files.append(f"\nDirectory: {path}\nError: {str(e)}")
 
@@ -137,6 +151,7 @@ async def llm_call(state: ResearcherState):
     1. Retrieves available tools from MCP server
     2. Binds tools to the language model
     3. Processes user input and decides on tool usage
+    4. Uses message pruning + workflow state tracking for LFM2
 
     Returns updated state with model response.
     """
@@ -144,11 +159,7 @@ async def llm_call(state: ResearcherState):
     client = get_mcp_client()
     mcp_tools = await client.get_tools()
 
-    # Create simplified tool set to reduce cognitive load on LFM2:
-    # - list_all_files: composite tool that handles directory discovery + listing in one call
-    # - read_file: for reading specific files the agent identifies
-    # - think_tool: for reflection
-    # This reduces the workflow from 4+ sequential steps to 2-3 steps
+    # Create simplified tool set to reduce cognitive load on LFM2
     read_file_tool = next((t for t in mcp_tools if t.name in ["read_file", "read_text_file"]), None)
 
     if read_file_tool:
@@ -160,12 +171,64 @@ async def llm_call(state: ResearcherState):
     # Initialize model with tool binding
     model_with_tools = model.bind_tools(tools)
 
-    # Process user input with system prompt
+    # MESSAGE PRUNING + WORKFLOW STATE FOR LFM2
+    # Critical: LFM2 only calls tools in response to HumanMessages, not ToolMessages
+    messages = state["researcher_messages"]
+
+    # Extract research question
+    research_question = ""
+    for msg in messages:
+        if isinstance(msg, HumanMessage):
+            research_question = msg.content
+            break
+
+    # Determine workflow state based on tool calls made
+    has_listed = any(
+        hasattr(m, 'tool_calls') and m.tool_calls and 
+        any(tc.get('name') == 'list_all_files' for tc in m.tool_calls) 
+        for m in messages
+    )
+    has_read = any(
+        hasattr(m, 'tool_calls') and m.tool_calls and 
+        any(tc.get('name') in ['read_file', 'read_text_file'] for tc in m.tool_calls)
+        for m in messages
+    )
+
+    # Build explicit workflow instructions based on state
+    if not has_listed:
+        next_step = "**NEXT ACTION:** Call list_all_files tool."
+    elif not has_read:
+        next_step = "**NEXT ACTION:** Call read_file tool. Copy the FULL_PATH exactly from the file list. DO NOT write text - ONLY call the tool."
+    else:
+        next_step = "**NEXT ACTION:** You have read the file. Provide your final research answer."
+
+    system_content = f"""{research_agent_prompt_with_mcp.format(date=get_today_str())}
+
+**RESEARCH QUESTION:**
+{research_question}
+
+{next_step}
+
+CRITICAL: Make tool calls. Do NOT write explanations."""
+
+    # KEY FIX: Convert ToolMessage to HumanMessage format
+    # LFM2 only reliably calls tools in response to HumanMessages (proven in tests)
+    if messages:
+        last_msg = messages[-1]
+        if isinstance(last_msg, ToolMessage):
+            # Convert ToolMessage content to HumanMessage so LFM2 treats it as a request
+            pruned_messages = [HumanMessage(content=last_msg.content)]
+        elif isinstance(last_msg, HumanMessage):
+            pruned_messages = [last_msg]
+        else:
+            # For other message types, wrap content as HumanMessage
+            pruned_messages = [HumanMessage(content=str(getattr(last_msg, 'content', '')))]
+    else:
+        pruned_messages = []
+
     return {
         "researcher_messages": [
-            model_with_tools.invoke(
-                [SystemMessage(content=research_agent_prompt_with_mcp.format(date=get_today_str()))] + state["researcher_messages"]
-            )
+            model_with_tools.invoke([SystemMessage(content=system_content)] + pruned_messages)
         ]
     }
 
