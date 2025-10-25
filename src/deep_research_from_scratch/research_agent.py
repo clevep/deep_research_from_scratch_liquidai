@@ -3,6 +3,12 @@
 
 This module implements a research agent that can perform iterative web searches
 and synthesis to answer complex research questions.
+
+Key features:
+- Iterative web search with Tavily API
+- Strategic reflection using think_tool
+- Message pruning for LFM2 compatibility (keeps 2-message context for tool calling)
+- Workflow state tracking to guide research process
 """
 
 from pydantic import BaseModel, Field
@@ -62,19 +68,80 @@ compress_model = init_chat_model(
 # ===== AGENT NODES =====
 
 def llm_call(state: ResearcherState):
-    """Analyze current state and decide on next actions.
+    """Analyze current state and decide on next actions with LFM2 compatibility.
 
-    The model analyzes the current conversation state and decides whether to:
-    1. Call search tools to gather more information
-    2. Provide a final answer based on gathered information
+    This node:
+    1. Tracks research progress (search count, think_tool usage)
+    2. Provides explicit workflow guidance based on state
+    3. Uses message pruning to maintain 2-message context for LFM2
 
-    Returns updated state with the model's response.
+    Returns updated state with model response.
     """
+    # MESSAGE PRUNING + WORKFLOW STATE FOR LFM2
+    # Critical: LFM2 only calls tools in response to HumanMessages, not ToolMessages
+    messages = state["researcher_messages"]
+
+    # Extract research question
+    research_question = ""
+    for msg in messages:
+        if isinstance(msg, HumanMessage):
+            research_question = msg.content
+            break
+
+    # Count searches performed
+    search_count = sum(
+        1 for m in messages 
+        if hasattr(m, 'tool_calls') and m.tool_calls and
+        any(tc.get('name') == 'tavily_search' for tc in m.tool_calls)
+    )
+
+    # Check if think_tool was used recently (last 2 messages)
+    recent_messages = messages[-2:] if len(messages) >= 2 else messages
+    has_recent_thought = any(
+        hasattr(m, 'tool_calls') and m.tool_calls and
+        any(tc.get('name') == 'think_tool' for tc in m.tool_calls)
+        for m in recent_messages
+    )
+
+    # Build explicit workflow instructions based on state
+    if search_count == 0:
+        next_step = "**NEXT ACTION:** Call tavily_search with a broad query about the research topic."
+    elif search_count >= 5:
+        next_step = "**NEXT ACTION:** You've reached the 5 search limit. Provide your final research answer now."
+    elif not has_recent_thought and search_count > 0:
+        next_step = "**NEXT ACTION:** Call think_tool to reflect on your search results. DO NOT write text - ONLY call the tool."
+    else:
+        next_step = "**NEXT ACTION:** Based on your reflection, either: (1) Call tavily_search if you need more info, OR (2) Provide your final answer if you have enough."
+
+    system_content = f"""{research_agent_prompt.format(date=get_today_str())}
+
+**RESEARCH QUESTION:**
+{research_question}
+
+**PROGRESS:** {search_count}/5 searches completed
+
+{next_step}
+
+CRITICAL: Make tool calls. Do NOT write explanations."""
+
+    # KEY FIX: Convert ToolMessage to HumanMessage format
+    # LFM2 only reliably calls tools in response to HumanMessages (proven in tests)
+    if messages:
+        last_msg = messages[-1]
+        if isinstance(last_msg, ToolMessage):
+            # Convert ToolMessage content to HumanMessage so LFM2 treats it as a request
+            pruned_messages = [HumanMessage(content=last_msg.content)]
+        elif isinstance(last_msg, HumanMessage):
+            pruned_messages = [last_msg]
+        else:
+            # For other message types, wrap content as HumanMessage
+            pruned_messages = [HumanMessage(content=str(getattr(last_msg, 'content', '')))]
+    else:
+        pruned_messages = []
+
     return {
         "researcher_messages": [
-            model_with_tools.invoke(
-                [SystemMessage(content=research_agent_prompt)] + state["researcher_messages"]
-            )
+            model_with_tools.invoke([SystemMessage(content=system_content)] + pruned_messages)
         ]
     }
 
