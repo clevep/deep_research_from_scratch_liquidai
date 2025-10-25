@@ -68,7 +68,15 @@ except ImportError:
 # ===== CONFIGURATION =====
 
 supervisor_tools = [ConductResearch, ResearchComplete, think_tool]
-supervisor_model = init_chat_model(model="anthropic:claude-sonnet-4-20250514")
+
+# Use LFM2-Tool model on port 8080 for supervisor (needs tool calling)
+supervisor_model = init_chat_model(
+    model="lfm2",
+    model_provider="openai",
+    base_url="http://localhost:8080/v1",
+    api_key="sk-no-key",
+    temperature=0,
+)
 supervisor_model_with_tools = supervisor_model.bind_tools(supervisor_tools)
 
 # System constants
