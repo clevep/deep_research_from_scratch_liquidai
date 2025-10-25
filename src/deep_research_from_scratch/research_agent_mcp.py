@@ -15,11 +15,13 @@ Key features:
 """
 
 import os
+import re
 
 from typing_extensions import Literal
 
 from langchain.chat_models import init_chat_model
 from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage, filter_messages
+from langchain_core.tools import tool as langchain_tool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.graph import StateGraph, START, END
 
@@ -69,8 +71,62 @@ model = init_chat_model(
     model_provider="openai",
     base_url="http://localhost:8080/v1",
     api_key="sk-no-key",
-    temperature=0.2,
+    temperature=0,
 )
+
+# ===== COMPOSITE TOOLS =====
+
+async def list_all_available_files_impl() -> str:
+    """Composite tool that lists all available files in one operation.
+
+    Combines list_allowed_directories + list_directory into a single tool call,
+    reducing the number of sequential decisions the LLM needs to make.
+    """
+    client = get_mcp_client()
+    mcp_tools = await client.get_tools()
+    tools_by_name = {tool.name: tool for tool in mcp_tools}
+
+    # Get allowed directories
+    list_dirs_tool = tools_by_name.get("list_allowed_directories")
+    if not list_dirs_tool:
+        return "Error: list_allowed_directories tool not found"
+
+    dirs_result = await list_dirs_tool.ainvoke({})
+
+    # Parse the directories (result is a string like "Allowed directories:\n/path/to/files")
+    paths = re.findall(r'/[^\n]+', str(dirs_result))
+
+    if not paths:
+        return "No directories found"
+
+    # List files in each directory
+    list_dir_tool = tools_by_name.get("list_directory")
+    if not list_dir_tool:
+        return f"Allowed directories: {paths[0]}\n(list_directory tool not available)"
+
+    all_files = []
+    for path in paths:
+        try:
+            files_result = await list_dir_tool.ainvoke({"path": path})
+            all_files.append(f"\nDirectory: {path}\nFiles: {files_result}")
+        except Exception as e:
+            all_files.append(f"\nDirectory: {path}\nError: {str(e)}")
+
+    return "".join(all_files)
+
+@langchain_tool
+async def list_all_files() -> str:
+    """List all available files in the research directory.
+
+    This is a composite tool that automatically:
+    1. Finds allowed directories
+    2. Lists all files in those directories
+
+    Use this as your FIRST tool call to see what files are available.
+
+    Returns: String listing all available files with their full paths
+    """
+    return await list_all_available_files_impl()
 
 # ===== AGENT NODES =====
 
@@ -88,8 +144,18 @@ async def llm_call(state: ResearcherState):
     client = get_mcp_client()
     mcp_tools = await client.get_tools()
 
-    # Use MCP tools for local document access
-    tools = mcp_tools + [think_tool]
+    # Create simplified tool set to reduce cognitive load on LFM2:
+    # - list_all_files: composite tool that handles directory discovery + listing in one call
+    # - read_file: for reading specific files the agent identifies
+    # - think_tool: for reflection
+    # This reduces the workflow from 4+ sequential steps to 2-3 steps
+    read_file_tool = next((t for t in mcp_tools if t.name in ["read_file", "read_text_file"]), None)
+
+    if read_file_tool:
+        tools = [list_all_files, read_file_tool, think_tool]
+    else:
+        # Fallback to all MCP tools if read_file not found
+        tools = [list_all_files] + mcp_tools + [think_tool]
 
     # Initialize model with tool binding
     model_with_tools = model.bind_tools(tools)
@@ -121,7 +187,7 @@ async def tool_node(state: ResearcherState):
         # Get fresh tool references from MCP server
         client = get_mcp_client()
         mcp_tools = await client.get_tools()
-        tools = mcp_tools + [think_tool]
+        tools = [list_all_files] + mcp_tools + [think_tool]
         tools_by_name = {tool.name: tool for tool in tools}
 
         # Execute tool calls (sequentially for reliability)
